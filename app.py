@@ -8,9 +8,6 @@ import datetime
 from dotenv import load_dotenv
 import os 
 
-# Disable MLflow autologging to avoid issues
-# mlflow.openai.autolog()
-
 # Load .env file
 load_dotenv()
 
@@ -45,23 +42,22 @@ try:
     client = MongoClient(MONGO_URI)
     db = client["fleet_data"]
     collection = db["fleet_collection"]
-    # Test connection
     client.server_info()
     print("✅ MongoDB connected successfully")
 except Exception as e:
     print(f"❌ ERROR connecting to MongoDB: {e}")
     collection = None
- 
+
 USERID = "manager123"
 USER = "FleetManager"
- 
+
 # Global state for current chat
 current_chat = []
- 
+
 # Delta Table Schema for SQL Generation
 DELTA_TABLE_SCHEMA = """
 Table Name: logistics_maintenance_predictions
- 
+
 Columns:
 - Vehicle_ID (int): Unique identifier for each vehicle
 - Make_and_Model (string): Vehicle make and model
@@ -87,8 +83,8 @@ Columns:
 - Failure_Type (string): Type of potential failure
 - Risk_Factors (string): Risk factors for maintenance
 """
- 
-# --- Initialize Azure OpenAI client ---
+
+# Initialize Azure OpenAI client
 try:
     llm_client = AzureOpenAI(
         api_key=AZURE_LLM_KEY,
@@ -99,9 +95,8 @@ try:
 except Exception as e:
     print(f"❌ ERROR initializing Azure OpenAI client: {e}")
     llm_client = None
- 
-# --- 2. MONGODB FUNCTIONS ---
- 
+
+# --- MONGODB FUNCTIONS ---
 def save_chat_session(title, chat, mode):
     """Save chat session to MongoDB"""
     if chat and collection is not None:
@@ -117,7 +112,7 @@ def save_chat_session(title, chat, mode):
             print(f"✅ Chat session saved: {title}")
         except Exception as e:
             print(f"❌ ERROR saving chat session: {e}")
- 
+
 def get_all_chats():
     """Retrieve all chat sessions from MongoDB"""
     if collection is None:
@@ -128,7 +123,7 @@ def get_all_chats():
     except Exception as e:
         print(f"❌ ERROR retrieving chats: {e}")
         return []
- 
+
 def show_previous_chats():
     """Format previous chats for display"""
     chats = get_all_chats()
@@ -136,36 +131,25 @@ def show_previous_chats():
     for title, mode, convo, timestamp in chats:
         markdown += f"• **{title}**  \n*{mode}* - {timestamp}\n\n"
     return markdown if markdown else "No previous chats found."
- 
-# --- 3. HELPER FUNCTIONS FOR FLEET MANAGER MODE ---
- 
+
+# --- HELPER FUNCTIONS FOR FLEET MANAGER MODE ---
 def generate_sql_query(user_question):
     """Use LLM to generate SQL query based on user's natural language question"""
     print(f"[DEBUG] Generating SQL for question: {user_question}")
    
     system_prompt = f"""You are an expert SQL query generator for a fleet maintenance database.
- 
+
 {DELTA_TABLE_SCHEMA}
- 
+
 Generate a VALID SQL query based on the user's question. Follow these rules:
 1. ONLY generate the SQL query, nothing else
 2. Use proper SQL syntax for Databricks
 3. Always use the table name: {TABLE_NAME}
 4. For date comparisons, use proper date formatting
-5. Use LIMIT clause when appropriate to avoid overwhelming results (max 100 rows)
+5. Use LIMIT clause when appropriate to avoid overwhelming results (max 50 rows)
 6. Return ONLY the SQL query without any explanation, markdown formatting, or additional text
- 
-Examples:
-Question: "Show me all vehicles that need maintenance"
-SQL: SELECT * FROM {TABLE_NAME} WHERE Maintenance_Required = 1 LIMIT 50
- 
-Question: "What is the average engine temperature?"
-SQL: SELECT AVG(Engine_Temperature) as avg_temp FROM {TABLE_NAME}
- 
-Question: "How many trucks need maintenance?"
-SQL: SELECT COUNT(*) as count FROM {TABLE_NAME} WHERE Vehicle_Type = 'Truck' AND Maintenance_Required = 1
 """
- 
+
     try:
         response = llm_client.chat.completions.create(
             model=AZURE_LLM_DEPLOYMENT_NAME,
@@ -174,66 +158,77 @@ SQL: SELECT COUNT(*) as count FROM {TABLE_NAME} WHERE Vehicle_Type = 'Truck' AND
                 {"role": "user", "content": user_question}
             ],
             temperature=0.1,
-            max_tokens=300
+            max_tokens=300,
+            timeout=20
         )
         sql_query = response.choices[0].message.content.strip()
-       
-        # Clean up the SQL query
         sql_query = re.sub(r'```sql\s*|\s*```', '', sql_query)
         sql_query = sql_query.strip()
-       
         print(f"[DEBUG] Generated SQL: {sql_query}")
         return sql_query
     except Exception as e:
         print(f"❌ ERROR generating SQL: {e}")
         return None
- 
+
 def execute_sql_query(sql_query):
     """Execute the generated SQL query on Databricks"""
     print(f"[DEBUG] Executing SQL: {sql_query}")
+    connection = None
+    cursor = None
+    
     try:
-        with dbsql.connect(
+        connection = dbsql.connect(
             server_hostname=DB_HOST,
             http_path=DB_HTTP_PATH,
             access_token=DB_TOKEN
-        ) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(sql_query)
-                results = cursor.fetchall()
-                columns = [desc[0] for desc in cursor.description]
-               
-                if not results:
-                    return "No data found matching your query.", []
-               
-                formatted_results = f"Query Results ({len(results)} rows):\n\n"
-               
-                if len(results) == 1 and len(columns) == 1:
-                    formatted_results += f"{columns[0]}: {results[0][0]}\n"
-                else:
-                    for row in results[:100]:
-                        row_dict = dict(zip(columns, row))
-                        for col, val in row_dict.items():
-                            formatted_results += f"{col}: {val}\n"
-                        formatted_results += "\n"
-                   
-                    if len(results) > 100:
-                        formatted_results += f"\n(Showing first 100 of {len(results)} results)"
-               
-                return formatted_results, results
-               
+        )
+        cursor = connection.cursor()
+        cursor.execute(sql_query)
+        results = cursor.fetchall()
+        columns = [desc[0] for desc in cursor.description]
+       
+        if not results:
+            return "No data found matching your query.", []
+       
+        formatted_results = f"Query Results ({len(results)} rows):\n\n"
+       
+        if len(results) == 1 and len(columns) == 1:
+            formatted_results += f"{columns[0]}: {results[0][0]}\n"
+        else:
+            display_limit = min(50, len(results))
+            for row in results[:display_limit]:
+                row_dict = dict(zip(columns, row))
+                for col, val in row_dict.items():
+                    formatted_results += f"{col}: {val}\n"
+                formatted_results += "\n"
+           
+            if len(results) > display_limit:
+                formatted_results += f"\n(Showing first {display_limit} of {len(results)} results)"
+       
+        return formatted_results, results
     except Exception as e:
         print(f"❌ ERROR executing SQL: {e}")
         return f"Error executing query: {str(e)}", []
- 
+    finally:
+        if cursor:
+            try:
+                cursor.close()
+            except:
+                pass
+        if connection:
+            try:
+                connection.close()
+            except:
+                pass
+
 def interpret_sql_results(user_question, sql_query, query_results):
     """Use LLM to interpret SQL results and provide natural language response"""
     print("[DEBUG] Interpreting SQL results with LLM")
    
     system_prompt = """You are a fleet management assistant. You help interpret database query results
     and present them in a clear, professional manner.
-   
-    Based on the user's question and the query results, provide a concise, helpful response.
-    Format your response clearly and highlight important information.
+    Provide insights and actionable information based on the data.
+    Keep responses concise and under 400 words.
     """
    
     user_prompt = f"""
@@ -243,10 +238,9 @@ def interpret_sql_results(user_question, sql_query, query_results):
     {sql_query}
    
     Query Results:
-    {query_results}
+    {query_results[:2000]}
    
-    Please interpret these results and answer the user's question in a clear, professional manner.
-    Provide insights and actionable information based on the data.
+    Please interpret these results and answer the user's question clearly.
     """
    
     try:
@@ -257,27 +251,27 @@ def interpret_sql_results(user_question, sql_query, query_results):
                 {"role": "user", "content": user_prompt}
             ],
             temperature=0.7,
-            max_tokens=600
+            max_tokens=500,
+            timeout=25
         )
         return response.choices[0].message.content
     except Exception as e:
         print(f"❌ ERROR interpreting results: {e}")
-        return query_results
- 
-# --- 4. MAIN CHAT ORCHESTRATOR ---
- 
+        return f"Here are the query results:\n\n{query_results[:1000]}"
+
+# --- MAIN CHAT ORCHESTRATOR ---
 def chat_orchestrator(message, history, mode):
     """Main orchestrator that routes to appropriate mode"""
     global current_chat
     print(f"[DEBUG] Mode: {mode}, Message: {message}")
+   
     if not llm_client:
         yield "The AI service is not available. Please check the configuration."
         return
+   
     if mode == "👔 Fleet Manager Mode":
-        # FLEET MANAGER MODE: Query database with LLM-generated SQL
         print("[DEBUG] Entering Fleet Manager Mode")
-        # Single initial status message
-        yield "🔍 Processing your request..."
+        
         try:
             # Generate SQL query
             sql_query = generate_sql_query(message)
@@ -286,44 +280,40 @@ def chat_orchestrator(message, history, mode):
                 current_chat.append({"message": message, "response": response})
                 yield response
                 return
-            # Execute query (removed intermediate yield to reduce lag)
-            print(f"[DEBUG] Executing SQL: {sql_query}")
+            
+            # Execute query
             query_results, raw_data = execute_sql_query(sql_query)
+            
             if not raw_data:
                 response = f"📊 Query executed successfully.\n\n{query_results}"
                 current_chat.append({"message": message, "response": response})
                 yield response
                 return
-            # Interpret results (final yield only)
+            
+            # Interpret results
             final_answer = interpret_sql_results(message, sql_query, query_results)
-            # Add SQL query context to response for transparency
             complete_response = f"**Query Executed:**\n```sql\n{sql_query}\n```\n\n{final_answer}"
+            
             print("\n--- FLEET MANAGER MODE Response ---")
             print(complete_response)
             print("-----------------------------------\n")
+            
             current_chat.append({"message": message, "response": complete_response})
             yield complete_response
+            
         except Exception as e:
-            error_msg = f"❌ Error processing request: {str(e)}\n\nPlease try again or rephrase your question."
+            error_msg = f"❌ Error: {str(e)}\n\nPlease try again."
             print(f"❌ ERROR in Fleet Manager Mode: {e}")
             current_chat.append({"message": message, "response": error_msg})
             yield error_msg
+   
     else:
-        # USER MODE: General maintenance advice without database access
+        # USER MODE
         print("[DEBUG] Entering User Mode")
         system_prompt = """You are a knowledgeable vehicle maintenance assistant helping regular users.
-You provide general advice about:
-- Vehicle maintenance best practices
-- Understanding maintenance indicators
-- When to schedule maintenance
-- Common vehicle issues and solutions
-- Interpreting warning signs
-- Predictive maintenance concepts
-You DO NOT have access to specific fleet data or databases.
-If users ask about specific vehicles or fleet data, politely inform them that they need
-to switch to Fleet Manager mode to access that information.
-Be helpful, professional, and educational in your responses.
-"""
+        Provide general advice about vehicle maintenance best practices.
+        You DO NOT have access to specific fleet data."""
+       
         try:
             response = llm_client.chat.completions.create(
                 model=AZURE_LLM_DEPLOYMENT_NAME,
@@ -333,65 +323,65 @@ Be helpful, professional, and educational in your responses.
                 ],
                 temperature=0.7,
                 max_tokens=500,
-                timeout=30  # Add timeout
+                timeout=30
             )
             final_answer = response.choices[0].message.content
             print("\n--- USER MODE Response ---")
             print(final_answer)
             print("-------------------------\n")
+            
             current_chat.append({"message": message, "response": final_answer})
             yield final_answer
         except Exception as e:
             print(f"❌ ERROR in User Mode: {e}")
-            error_msg = "I'm sorry, I'm having trouble processing your request. Please try again later."
+            error_msg = "I'm having trouble processing your request. Please try again."
             current_chat.append({"message": message, "response": error_msg})
             yield error_msg
- 
-# --- 5. GRADIO INTERFACE ---
- 
+
+# --- GRADIO UI FUNCTIONS ---
 def respond(message, history, mode):
-    """Handle user message and generate response"""
+    """Handle user message and generate response with proper streaming"""
     if not message.strip():
-        return history, ""
-   
-    history.append((message, None))
-   
-    for response in chat_orchestrator(message, history, mode):
-        history[-1] = (message, response)
         yield history, ""
- 
+        return
+   
+    # Add user message to history
+    history = history + [(message, "")]
+    
+    # Stream the response
+    for partial_response in chat_orchestrator(message, history[:-1], mode):
+        history[-1] = (message, partial_response)
+        yield history, ""
+    
+    # Final yield
+    yield history, ""
+
 def start_new_chat(history, mode):
     """Start a new chat session and save the current one"""
     global current_chat
    
     if current_chat:
-        title = current_chat[0]["message"][:50] if current_chat else f"Chat on {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
+        title = current_chat[0]["message"][:50] if current_chat else f"Chat {datetime.datetime.utcnow().strftime('%Y-%m-%d %H:%M')}"
         save_chat_session(title, current_chat, mode)
    
     current_chat = []
-    welcome_msg = "✨ New chat started! How can I help you today? ✨"
-    history = []
-   
-    return history, gr.update(value=show_previous_chats())
- 
+    return [], gr.update(value=show_previous_chats())
+
 def toggle_sidebar(current_visible):
     """Toggle sidebar visibility"""
     new_state = not current_visible
     content_update = gr.update(value=show_previous_chats()) if new_state else gr.update(value="")
     return new_state, gr.update(visible=new_state), content_update
- 
-# --- 6. BUILD GRADIO UI ---
- 
+
+# --- BUILD GRADIO UI ---
 with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
     * {
         font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
     }
-   
     #main-container {
         background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
         min-height: 100vh;
     }
-   
     #header {
         background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
         padding: 20px;
@@ -399,13 +389,11 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
         margin-bottom: 20px;
         box-shadow: 0 8px 24px rgba(59, 130, 246, 0.3);
     }
-   
     .top-buttons-container {
         display: flex;
         gap: 10px;
         margin-bottom: 15px;
     }
-   
     #new-chat-btn, #sidebar-btn {
         flex: 1;
         background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
@@ -419,13 +407,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
         transition: all 0.3s ease;
         box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
     }
-   
-    #new-chat-btn:hover, #sidebar-btn:hover {
-        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-        transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
-    }
-   
     #sidebar {
         background: rgba(30, 41, 59, 0.8);
         border: 1px solid rgba(59, 130, 246, 0.2);
@@ -435,32 +416,12 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
         height: calc(100vh - 250px);
         overflow-y: auto;
     }
-   
-    #mode-selector {
-        background: linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1));
-        border: 1px solid rgba(59, 130, 246, 0.2);
-        padding: 15px;
-        border-radius: 12px;
-        margin-bottom: 15px;
-    }
-   
     .mode-description {
         background: linear-gradient(135deg, rgba(34, 197, 94, 0.1), rgba(59, 130, 246, 0.1));
         border-left: 4px solid #22c55e;
         padding: 12px;
         border-radius: 8px;
         margin-bottom: 15px;
-    }
-    
-    .previous-chats-display {
-        color: #e2e8f0;
-        font-size: 13px;
-    }
-   
-    .previous-chats-display h3 {
-        color: #60a5fa;
-        margin-top: 10px;
-        font-size: 14px;
     }
 """) as demo:
     sidebar_state = gr.State(False)
@@ -470,18 +431,15 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
             with gr.Column(scale=1, min_width=300):
                 with gr.Column():
                     gr.HTML("<h3 style='color: #60a5fa; margin-top: 0;'>📚 Chat History</h3>")
-                   
                     with gr.Row(elem_classes="top-buttons-container"):
                         new_chat_btn = gr.Button("➕ New Chat", elem_id="new-chat-btn", scale=1)
                         sidebar_btn = gr.Button("☰ Previous Chats", elem_id="sidebar-btn", scale=1)
-                   
                     sidebar = gr.Column(visible=False, elem_id="sidebar")
                     with sidebar:
                         previous_chats_display = gr.Markdown(elem_classes="previous-chats-display")
        
             with gr.Column(scale=3):
                 gr.HTML("<div id='header'><h1 style='margin: 0; text-align: center; color: white;'>🚛 Intelligent Fleet Maintenance Assistant</h1><p style='margin: 8px 0 0 0; text-align: center; color: rgba(255,255,255,0.8); font-size: 14px;'>Advanced Predictive Maintenance & Fleet Analytics</p></div>")
-               
                 mode_selector = gr.Radio(
                     choices=["👤 User Mode", "👔 Fleet Manager Mode"],
                     value="👤 User Mode",
@@ -489,7 +447,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
                     info="Choose between general advice or fleet database access",
                     elem_id="mode-selector"
                 )
-               
                 mode_description = gr.Markdown("""
                 <div class="mode-description">
                 <strong>👤 User Mode Active</strong><br>
@@ -497,9 +454,7 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
                 • No access to specific fleet data
                 </div>
                 """, elem_classes="mode-description")
-               
                 chatbot = gr.Chatbot(height=500, elem_classes="chatbot-container")
-               
                 with gr.Row():
                     msg = gr.Textbox(
                         placeholder="Type your question here...",
@@ -511,53 +466,36 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
                     send_btn = gr.Button("📤 Send", scale=1)
    
     def update_mode_description(mode):
-        """Update description based on selected mode"""
         if mode == "👤 User Mode":
-            return """
-            <div class="mode-description">
-            <strong>👤 User Mode Active</strong><br>
-            • Ask and learn about vehicle maintenance<br>
-            • No access to specific fleet data
-            </div>
-            """
+            return """<div class="mode-description"><strong>👤 User Mode Active</strong><br>• Ask and learn about vehicle maintenance<br>• No access to specific fleet data</div>"""
         else:
-            return """
-            <div class="mode-description">
-            <strong>👔 Fleet Manager Mode Active</strong><br>
-            • Monitor and predict fleet performance<br>
-            • Access and analyze vehicle data
-            </div>
-            """
+            return """<div class="mode-description"><strong>👔 Fleet Manager Mode Active</strong><br>• Monitor and predict fleet performance<br>• Access and analyze vehicle data</div>"""
    
     # Connect events
     mode_selector.change(
         fn=update_mode_description,
         inputs=[mode_selector],
-        outputs=[mode_description]
+        outputs=[mode_description],
+        queue=False
     )
-   
-    send_btn.click(respond, [msg, chatbot, mode_selector], [chatbot, msg])
-    msg.submit(respond, [msg, chatbot, mode_selector], [chatbot, msg])
-    new_chat_btn.click(start_new_chat, [chatbot, mode_selector], [chatbot, previous_chats_display])
-    demo.load(show_previous_chats, outputs=previous_chats_display)
-    sidebar_btn.click(toggle_sidebar, sidebar_state, [sidebar_state, sidebar, previous_chats_display])
+    send_btn.click(respond, [msg, chatbot, mode_selector], [chatbot, msg], queue=True)
+    msg.submit(respond, [msg, chatbot, mode_selector], [chatbot, msg], queue=True)
+    new_chat_btn.click(start_new_chat, [chatbot, mode_selector], [chatbot, previous_chats_display], queue=False)
+    demo.load(show_previous_chats, outputs=previous_chats_display, queue=False)
+    sidebar_btn.click(toggle_sidebar, sidebar_state, [sidebar_state, sidebar, previous_chats_display], queue=False)
 
-# CRITICAL: Enable queue before launching
-demo.queue(max_size=20)
- 
-# --- 7. LAUNCH ---
- 
+# Configure queue for Gradio 3.x
+demo.queue(concurrency_count=3, status_update_rate="auto")
+
+# Launch
 if __name__ == "__main__":
     print("🚀 Dual-Mode Fleet Maintenance Chatbot Starting...")
-    print(f"Python Version: {os.sys.version}")
-    print(f"Working Directory: {os.getcwd()}")
     print(f"Gradio Version: {gr.__version__}")
-    
     demo.launch(
-        server_name="0.0.0.0",  # Listen on all network interfaces
+        server_name="0.0.0.0",
         server_port=7860,
-        share=False,  # Set to False for production
+        share=False,
         show_error=True,
-        show_api=False
+        enable_queue=True,  # CRITICAL for Gradio 3.x
+        debug=False
     )
-
