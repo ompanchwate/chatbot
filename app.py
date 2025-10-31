@@ -45,6 +45,8 @@ try:
     client = MongoClient(MONGO_URI)
     db = client["fleet_data"]
     collection = db["fleet_collection"]
+    # Test connection
+    client.server_info()
     print("✅ MongoDB connected successfully")
 except Exception as e:
     print(f"❌ ERROR connecting to MongoDB: {e}")
@@ -373,8 +375,8 @@ def start_new_chat(history, mode):
         save_chat_session(title, current_chat, mode)
    
     current_chat = []
-    welcome_msg = "<div style='text-align:center; font-size:20px; font-weight:bold; color:#2196F3;'>✨ New chat started! How can I help you today? ✨</div>"
-    history = [(welcome_msg, "")]
+    welcome_msg = "✨ New chat started! How can I help you today? ✨"
+    history = []
    
     return history, gr.update(value=show_previous_chats())
  
@@ -455,6 +457,17 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
         border-radius: 8px;
         margin-bottom: 15px;
     }
+    
+    .previous-chats-display {
+        color: #e2e8f0;
+        font-size: 13px;
+    }
+   
+    .previous-chats-display h3 {
+        color: #60a5fa;
+        margin-top: 10px;
+        font-size: 14px;
+    }
 """) as demo:
     sidebar_state = gr.State(False)
    
@@ -534,6 +547,9 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
     new_chat_btn.click(start_new_chat, [chatbot, mode_selector], [chatbot, previous_chats_display])
     demo.load(show_previous_chats, outputs=previous_chats_display)
     sidebar_btn.click(toggle_sidebar, sidebar_state, [sidebar_state, sidebar, previous_chats_display])
+
+# CRITICAL: Enable queue before launching
+demo.queue(max_size=20)
  
 # --- 7. LAUNCH ---
  
@@ -541,6 +557,7 @@ if __name__ == "__main__":
     print("🚀 Dual-Mode Fleet Maintenance Chatbot Starting...")
     print(f"Python Version: {os.sys.version}")
     print(f"Working Directory: {os.getcwd()}")
+    print(f"Gradio Version: {gr.__version__}")
     
     demo.launch(
         server_name="0.0.0.0",  # Listen on all network interfaces
