@@ -1,4 +1,3 @@
- 
 import gradio as gr
 import re
 from openai import AzureOpenAI
@@ -9,7 +8,9 @@ import datetime
 from dotenv import load_dotenv
 import os 
 
-mlflow.openai.autolog()
+# Disable MLflow autologging to avoid issues
+# mlflow.openai.autolog()
+
 # Load .env file
 load_dotenv()
 
@@ -27,9 +28,27 @@ TABLE_NAME = os.getenv("TABLE_NAME")
 # MongoDB
 MONGO_URI = os.getenv("MONGO_URI")
 
-client = MongoClient(MONGO_URI)
-db = client["fleet_data"]
-collection = db["fleet_collection"]
+# Validate required environment variables
+required_vars = {
+    "AZURE_LLM_ENDPOINT": AZURE_LLM_ENDPOINT,
+    "AZURE_LLM_KEY": AZURE_LLM_KEY,
+    "AZURE_LLM_DEPLOYMENT_NAME": AZURE_LLM_DEPLOYMENT_NAME,
+    "MONGO_URI": MONGO_URI
+}
+
+missing_vars = [k for k, v in required_vars.items() if not v]
+if missing_vars:
+    print(f"⚠️  WARNING: Missing environment variables: {', '.join(missing_vars)}")
+    print("Please check your .env file")
+
+try:
+    client = MongoClient(MONGO_URI)
+    db = client["fleet_data"]
+    collection = db["fleet_collection"]
+    print("✅ MongoDB connected successfully")
+except Exception as e:
+    print(f"❌ ERROR connecting to MongoDB: {e}")
+    collection = None
  
 USERID = "manager123"
 USER = "FleetManager"
@@ -83,28 +102,37 @@ except Exception as e:
  
 def save_chat_session(title, chat, mode):
     """Save chat session to MongoDB"""
-    if chat:
-        collection.insert_one({
-            "userid": USERID,
-            "user": USER,
-            "mode": mode,
-            "title": title,
-            "timestamp": datetime.datetime.utcnow(),
-            "conversation": chat
-        })
-        print(f"✅ Chat session saved: {title}")
+    if chat and collection is not None:
+        try:
+            collection.insert_one({
+                "userid": USERID,
+                "user": USER,
+                "mode": mode,
+                "title": title,
+                "timestamp": datetime.datetime.utcnow(),
+                "conversation": chat
+            })
+            print(f"✅ Chat session saved: {title}")
+        except Exception as e:
+            print(f"❌ ERROR saving chat session: {e}")
  
 def get_all_chats():
     """Retrieve all chat sessions from MongoDB"""
-    docs = collection.find({"userid": USERID, "conversation": {"$exists": True}}).sort("timestamp", -1)
-    return [(doc.get("title", "Untitled"), doc.get("mode", "Unknown"), doc["conversation"], doc["timestamp"].strftime("%Y-%m-%d %H:%M")) for doc in docs]
+    if collection is None:
+        return []
+    try:
+        docs = collection.find({"userid": USERID, "conversation": {"$exists": True}}).sort("timestamp", -1)
+        return [(doc.get("title", "Untitled"), doc.get("mode", "Unknown"), doc["conversation"], doc["timestamp"].strftime("%Y-%m-%d %H:%M")) for doc in docs]
+    except Exception as e:
+        print(f"❌ ERROR retrieving chats: {e}")
+        return []
  
 def show_previous_chats():
     """Format previous chats for display"""
     chats = get_all_chats()
     markdown = ""
     for title, mode, convo, timestamp in chats:
-        markdown += f"• **{title}**  \n*{mode}*\n\n"
+        markdown += f"• **{title}**  \n*{mode}* - {timestamp}\n\n"
     return markdown if markdown else "No previous chats found."
  
 # --- 3. HELPER FUNCTIONS FOR FLEET MANAGER MODE ---
@@ -402,10 +430,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
         box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
     }
    
-    #new-chat-btn:active, #sidebar-btn:active {
-        transform: translateY(0);
-    }
-   
     #sidebar {
         background: rgba(30, 41, 59, 0.8);
         border: 1px solid rgba(59, 130, 246, 0.2);
@@ -414,16 +438,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
         backdrop-filter: blur(10px);
         height: calc(100vh - 250px);
         overflow-y: auto;
-    }
-   
-    #sidebar-btn {
-        background: linear-gradient(135deg, #8b5cf6 0%, #7c3aed 100%);
-        box-shadow: 0 4px 12px rgba(139, 92, 246, 0.3);
-    }
-   
-    #sidebar-btn:hover {
-        background: linear-gradient(135deg, #7c3aed 0%, #6d28d9 100%);
-        box-shadow: 0 6px 16px rgba(139, 92, 246, 0.4);
     }
    
     #mode-selector {
@@ -440,64 +454,6 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
         padding: 12px;
         border-radius: 8px;
         margin-bottom: 15px;
-    }
-   
-    #send-btn {
-        background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
-        color: white;
-        padding: 12px;
-        border: none;
-        border-radius: 8px;
-        cursor: pointer;
-        font-weight: 600;
-        font-size: 14px;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
-        width: 100%;
-    }
-   
-    #send-btn:hover {
-        background: linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%);
-        transform: translateY(-2px);
-        box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
-    }
-   
-    #send-btn:active {
-        transform: translateY(0);
-    }
-   
-    .chatbot-container {
-        background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.9));
-        border: 1px solid rgba(59, 130, 246, 0.2);
-        border-radius: 12px;
-        padding: 15px;
-        box-shadow: inset 0 2px 8px rgba(0, 0, 0, 0.3);
-    }
-   
-    textarea {
-        background: linear-gradient(135deg, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.8));
-        border: 1px solid rgba(59, 130, 246, 0.3);
-        border-radius: 8px !important;
-        color: white;
-        padding: 12px !important;
-        transition: all 0.3s ease;
-    }
-   
-    textarea:focus {
-        border-color: #3b82f6 !important;
-        box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
-        background: linear-gradient(135deg, rgba(30, 41, 59, 0.9), rgba(15, 23, 42, 0.9));
-    }
-   
-    .previous-chats-display {
-        color: #e2e8f0;
-        font-size: 13px;
-    }
-   
-    .previous-chats-display h3 {
-        color: #60a5fa;
-        margin-top: 10px;
-        font-size: 14px;
     }
 """) as demo:
     sidebar_state = gr.State(False)
@@ -542,9 +498,10 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
                         placeholder="Type your question here...",
                         show_label=False,
                         lines=3,
-                        max_lines=5
+                        max_lines=5,
+                        scale=9
                     )
-                    send_btn = gr.Button("📤 Send", elem_id="send-btn", scale=0, min_width=80)
+                    send_btn = gr.Button("📤 Send", scale=1)
    
     def update_mode_description(mode):
         """Update description based on selected mode"""
@@ -582,4 +539,13 @@ with gr.Blocks(theme=gr.themes.Soft(primary_hue="blue"), css="""
  
 if __name__ == "__main__":
     print("🚀 Dual-Mode Fleet Maintenance Chatbot Starting...")
-    demo.launch(share=True)
+    print(f"Python Version: {os.sys.version}")
+    print(f"Working Directory: {os.getcwd()}")
+    
+    demo.launch(
+        server_name="0.0.0.0",  # Listen on all network interfaces
+        server_port=7860,
+        share=False,  # Set to False for production
+        show_error=True,
+        show_api=False
+    )
