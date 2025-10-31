@@ -270,51 +270,48 @@ def chat_orchestrator(message, history, mode):
     """Main orchestrator that routes to appropriate mode"""
     global current_chat
     print(f"[DEBUG] Mode: {mode}, Message: {message}")
-   
     if not llm_client:
         yield "The AI service is not available. Please check the configuration."
         return
-   
     if mode == "👔 Fleet Manager Mode":
         # FLEET MANAGER MODE: Query database with LLM-generated SQL
         print("[DEBUG] Entering Fleet Manager Mode")
-       
-        yield "🔍 Analyzing your question and generating database query..."
-       
-        sql_query = generate_sql_query(message)
-        if not sql_query:
-            response = "I couldn't generate a valid query for your question. Please try rephrasing it."
-            current_chat.append({"message": message, "response": response})
-            yield response
-            return
-       
-        yield f"⚙️ Executing query...\n\n`{sql_query}`\n\n"
-       
-        query_results, raw_data = execute_sql_query(sql_query)
-       
-        if not raw_data:
-            response = f"📊 Query executed successfully.\n\n{query_results}"
-            current_chat.append({"message": message, "response": response})
-            yield response
-            return
-       
-        yield "📊 Analyzing results..."
-       
-        final_answer = interpret_sql_results(message, sql_query, query_results)
-       
-        print("\n--- FLEET MANAGER MODE Response ---")
-        print(final_answer)
-        print("-----------------------------------\n")
-       
-        current_chat.append({"message": message, "response": final_answer})
-        yield final_answer
-   
+        # Single initial status message
+        yield "🔍 Processing your request..."
+        try:
+            # Generate SQL query
+            sql_query = generate_sql_query(message)
+            if not sql_query:
+                response = "I couldn't generate a valid query for your question. Please try rephrasing it."
+                current_chat.append({"message": message, "response": response})
+                yield response
+                return
+            # Execute query (removed intermediate yield to reduce lag)
+            print(f"[DEBUG] Executing SQL: {sql_query}")
+            query_results, raw_data = execute_sql_query(sql_query)
+            if not raw_data:
+                response = f"📊 Query executed successfully.\n\n{query_results}"
+                current_chat.append({"message": message, "response": response})
+                yield response
+                return
+            # Interpret results (final yield only)
+            final_answer = interpret_sql_results(message, sql_query, query_results)
+            # Add SQL query context to response for transparency
+            complete_response = f"**Query Executed:**\n```sql\n{sql_query}\n```\n\n{final_answer}"
+            print("\n--- FLEET MANAGER MODE Response ---")
+            print(complete_response)
+            print("-----------------------------------\n")
+            current_chat.append({"message": message, "response": complete_response})
+            yield complete_response
+        except Exception as e:
+            error_msg = f"❌ Error processing request: {str(e)}\n\nPlease try again or rephrase your question."
+            print(f"❌ ERROR in Fleet Manager Mode: {e}")
+            current_chat.append({"message": message, "response": error_msg})
+            yield error_msg
     else:
         # USER MODE: General maintenance advice without database access
         print("[DEBUG] Entering User Mode")
-       
         system_prompt = """You are a knowledgeable vehicle maintenance assistant helping regular users.
- 
 You provide general advice about:
 - Vehicle maintenance best practices
 - Understanding maintenance indicators
@@ -322,14 +319,11 @@ You provide general advice about:
 - Common vehicle issues and solutions
 - Interpreting warning signs
 - Predictive maintenance concepts
- 
 You DO NOT have access to specific fleet data or databases.
 If users ask about specific vehicles or fleet data, politely inform them that they need
 to switch to Fleet Manager mode to access that information.
- 
 Be helpful, professional, and educational in your responses.
 """
-       
         try:
             response = llm_client.chat.completions.create(
                 model=AZURE_LLM_DEPLOYMENT_NAME,
@@ -338,13 +332,13 @@ Be helpful, professional, and educational in your responses.
                     {"role": "user", "content": message}
                 ],
                 temperature=0.7,
-                max_tokens=500
+                max_tokens=500,
+                timeout=30  # Add timeout
             )
             final_answer = response.choices[0].message.content
             print("\n--- USER MODE Response ---")
             print(final_answer)
             print("-------------------------\n")
-           
             current_chat.append({"message": message, "response": final_answer})
             yield final_answer
         except Exception as e:
@@ -566,3 +560,4 @@ if __name__ == "__main__":
         show_error=True,
         show_api=False
     )
+
